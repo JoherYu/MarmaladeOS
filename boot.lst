@@ -1,0 +1,220 @@
+     1                                          core_base_address equ 0x00040000
+     2                                          core_start_sector equ 0x00000001
+     3                                          e_entry_offset equ 24
+     4                                          e_shoff_offset equ 32
+     5                                          e_shentsize_offset equ 46
+     6                                          e_shnum_offset equ 48
+     7                                  
+     8                                  SECTION MBR vstart=0x00007c00
+     9                                  ;===============================================================================
+    10                                         
+    11                                          ;from real mode to protect mode
+    12                                       
+    13 00000000 8CC8                            mov ax,cs ;initialize stack segment register to 0(let's forget about 8086 and 
+    14 00000002 8ED0                            mov ss,ax ;assume your BIOS initialize code segment to 0,you could write 'mov 
+    15                                                    ;ax,0' instead)
+    16 00000004 BC007C                          mov sp,0x7c00 ;initialize stack pointer
+    17                                          
+    18                                  ;-------------------------------------------------------------------------------
+    19                                          ;calculate address of GDT
+    20 00000007 2E66A1[7E01]                    mov eax,[cs:pgdt+0x02] ;load 32 bits GDT address
+    21 0000000C 6631D2                          xor edx,edx ;calulate 16 bits GDT address
+    22 0000000F 66BB10000000                    mov ebx,16
+    23 00000015 66F7F3                          div ebx
+    24                                          
+    25 00000018 8ED8                            mov ds,eax ;load GDT segment adress
+    26 0000001A 6689D3                          mov ebx,edx ;load GDT offset to ebx
+    27                                          
+    28                                          ;create 1# code segment descriptor(processor requiring skip on 0# descriptor)
+    29 0000001D 6667C74308FFFF0000              mov dword [ebx+0x08],0x0000ffff
+    30 00000026 6667C7430C0098CF00              mov dword [ebx+0x0c],0x00cf9800
+    31                                          
+    32                                          ;create 2# data segment(stack segment) descriptor
+    33 0000002F 6667C74310FFFF0000              mov dword [ebx+0x10],0x0000ffff
+    34 00000038 6667C743140092CF00              mov dword [ebx+0x14],0x00cf9200
+    35                                          
+    36 00000041 2EC706[7C01]1700                mov word [cs:pgdt],23 ;modify GDT size
+    37 00000048 2E0F0116[7C01]                  lgdt [cs:pgdt] ;initialize GDT register
+    38                                  
+    39                                  ;-------------------------------------------------------------------------------
+    40                                          ;JUST DO IT,for historical reason (about A20 line)
+    41 0000004E E492                            in al,0x92
+    42 00000050 0C02                            or al,0000_0010B
+    43 00000052 E692                            out 0x92,al
+    44                                  
+    45                                  ;-------------------------------------------------------------------------------
+    46 00000054 FA                              cli ;shutdown interruption
+    47                                          
+    48                                          ;enter protect mode
+    49 00000055 0F20C0                          mov eax,cr0
+    50 00000058 6683C801                        or eax,1
+    51 0000005C 0F22C0                          mov cr0,eax
+    52                                          
+    53                                          ;empty pipeline
+    54 0000005F 66EA[67000000]0800              jmp dword 0x0008:loader
+    55                                  ;===============================================================================
+    56                                         
+    57                                          [bits 32]
+    58                                  loader:
+    59                                          ;initialize segment registers to 2#(data segment) descriptor
+    60 00000067 B810000000                      mov eax,0x00010
+    61 0000006C 8ED8                            mov ds,eax
+    62 0000006E 8EC0                            mov es,eax            
+    63 00000070 8EE0                            mov fs,eax
+    64 00000072 8EE8                            mov gs,eax
+    65 00000074 8ED0                            mov ss,eax
+    66 00000076 BC00700000                      mov esp,0x7000 ;initialize stack pointer
+    67                                  
+    68 0000007B BF00000400                      mov edi,core_base_address
+    69 00000080 B801000000                      mov eax,core_start_sector
+    70 00000085 89FB                            mov ebx,edi
+    71 00000087 E833000000                      call read_one_sector
+    72                                  
+    73                                          ;calculate core size
+    74 0000008C 8B472E                          mov eax,[edi+e_shentsize_offset]
+    75 0000008F 66F76730                        mul word [edi+e_shnum_offset]
+    76 00000093 C1E210                          shl edx,16
+    77 00000096 01C2                            add edx,eax
+    78 00000098 035720                          add edx,[edi+e_shoff_offset]
+    79 0000009B 89D0                            mov eax,edx
+    80                                  
+    81                                          ;calsulate number of sector
+    82 0000009D 31D2                            xor edx,edx
+    83 0000009F B900020000                      mov ecx,512
+    84 000000A4 F7F1                            div ecx
+    85                                  
+    86 000000A6 09D2                            or edx,edx ;determine if the remainder is 0
+    87 000000A8 7501                            jnz @1 ;jump if not eliminated(need not descend 1 cause already load a 
+    88                                                 ;sector)
+    89 000000AA 48                              dec eax ;
+    90                                      @1:
+    91                                          ;considering case that core size less than 512 bytes
+    92 000000AB 09C0                            or eax,eax
+    93 000000AD 7455                            jz pge
+    94                                  
+    95                                          ;read remain sectors
+    96 000000AF 89C1                            mov ecx,eax ;loop in protect mode using ecx
+    97 000000B1 B801000000                      mov eax,core_start_sector
+    98 000000B6 40                              inc eax ;read from the next logical sector(already read one)
+    99                                      @2:
+   100 000000B7 E803000000                      call read_one_sector
+   101 000000BC 40                              inc eax
+   102 000000BD E2F8                            loop @2
+   103                                  
+   104                                  ;-------------------------------------------------------------------------------
+   105                                  read_one_sector:
+   106 000000BF 50                              push eax ;logical sector number
+   107                                          ;target adress is stored in ebx,will change during the process to point 
+   108                                          ;to next target address
+   109 000000C0 51                              push ecx
+   110 000000C1 52                              push edx
+   111                                  
+   112 000000C2 50                              push eax ;for later use
+   113                                  
+   114 000000C3 66BAF201                        mov dx,0x1f2 ;0x1f2,port for number of sectors
+   115 000000C7 B001                            mov al,1 ;number of sectors is 1
+   116 000000C9 EE                              out dx,al
+   117                                  
+   118 000000CA 6642                            inc dx ;0x1f3,port for digits 0 to 7 of the LBA address
+   119 000000CC 58                              pop eax
+   120 000000CD EE                              out dx,al ;write lowest 8 bits of eax
+   121                                  
+   122 000000CE 6642                            inc dx ;0x1f4,port for digits 8 to 15 of the LBA address
+   123 000000D0 B108                            mov cl,8
+   124 000000D2 D3E8                            shr eax,cl ;move 8 bits to the right to get digits 8 to 15 of the LBA address
+   125 000000D4 EE                              out dx,al
+   126                                  
+   127 000000D5 6642                            inc dx ;0x1f5,port for digits 16 to 23 of the LBA address
+   128 000000D7 D3E8                            shr eax,cl
+   129 000000D9 EE                              out dx,al
+   130                                  
+   131 000000DA 6642                            inc dx ;0x1f6,port for digits 24 to 27 of the LBA address
+   132 000000DC D3E8                            shr eax,cl
+   133 000000DE 0CE0                            or al,0xe0 ;modify al to set LBA mode,master disk
+   134 000000E0 EE                              out dx,al
+   135                                  
+   136 000000E1 6642                            inc dx ;0x1f7,port for r/w mode
+   137 000000E3 B020                            mov al,0x20 ;0x20,read mode
+   138 000000E5 EE                              out dx,al
+   139                                  
+   140                                      .waits:
+   141 000000E6 EC                              in al,dx ;0x1f7 port here for status(busy when 7th digit is 1,ready wh-
+   142                                                   ;-en third digit is 1 and 7th digit is 0)
+   143 000000E7 2488                            and al,0x88 ;retain third and 7th digits
+   144 000000E9 3C80                            cmp al,0x80
+   145 000000EB 75F9                            jnz .waits
+   146                                  
+   147 000000ED B900010000                      mov ecx,256 ;number of words need to read
+   148 000000F2 66BAF001                        mov dx,0x1f0 ;0x1f0,data port
+   149                                      .readw:
+   150 000000F6 66ED                            in ax,dx
+   151 000000F8 668903                          mov [ebx],ax
+   152 000000FB 83C302                          add ebx,2
+   153 000000FE E2F6                            loop .readw
+   154                                  
+   155 00000100 5A                              pop edx
+   156 00000101 59                              pop ecx
+   157 00000102 58                              pop eax
+   158                                  
+   159 00000103 C3                              ret
+   160                                  ;===============================================================================
+   161                                  
+   162                                      ;enable paging
+   163                                      pge:
+   164                                          ;create page directory table(PDT)
+   165 00000104 BB00000200                      mov ebx,0x00020000 ;PDT physical address
+   166 00000109 C783FC0F0000030002-             mov dword [ebx+4092],0x00020003 ;create an entry that points to the PDT
+   166 00000112 00                 
+   167                                                                          ;itself in case the requirement of PDT 
+   168                                                                          ;modification
+   169 00000113 BA03100200                      mov edx,0x00021003 ;PDT entry for PT adress 0x00021000
+   170 00000118 8913                            mov [ebx+0x000],edx ;create an entry corresponding to the linear address
+   171                                                              ;0x00000000 in PDT as a transition entry
+   172 0000011A 899300080000                    mov [ebx+0x800],edx ;create an entry corresponding to the linear address
+   173                                                              ;0x80000000 in PDT(this is the entry we use)
+   174                                  
+   175                                          ;create page table(PT)
+   176 00000120 BB00100200                      mov ebx, 0x00021000 ;PT physical address
+   177                                  
+   178                                          ;create entries in a circular fashion,eax for physical address,esi for 
+   179                                          ;index
+   180 00000125 31C0                            xor eax,eax 
+   181 00000127 31F6                            xor esi,esi
+   182                                      .b1:
+   183 00000129 89C2                            mov edx,eax
+   184 0000012B 83CA03                          or edx,0x000000003
+   185 0000012E 8914B3                          mov [ebx+esi*4],edx
+   186 00000131 0500100000                      add eax,0x1000
+   187 00000136 46                              inc esi
+   188 00000137 81FE00010000                    cmp esi,256
+   189 0000013D 7CEA                            jl .b1
+   190                                  
+   191                                          ;turn on pagination
+   192 0000013F B800000200                      mov eax,0x00020000
+   193 00000144 0F22D8                          mov cr3,eax
+   194                                  
+   195                                  ;===============================================================================
+   196                                          ;map the linear address of GDT to the same location starting at 
+   197                                          ;0x80000000
+   198 00000147 0F0105[7C010000]                sgdt [pgdt]
+   199 0000014E 8B1D[7E010000]                  mov ebx,[pgdt+2]
+   200 00000154 8105[7E010000]0000-             add dword [pgdt+2],0x80000000
+   200 0000015C 0080               
+   201 0000015E 0F0115[7C010000]                lgdt [pgdt]
+   202                                       
+   203 00000165 0F20C0                          mov eax,cr0
+   204 00000168 0D00000080                      or eax,0x80000000
+   205 0000016D 0F22C0                          mov cr0,eax
+   206                                  
+   207                                          ;map stack adress as well
+   208 00000170 81C400000080                    add esp,0x80000000
+   209                                  
+   210 00000176 FF2518000480                    jmp [0x80040000+e_entry_offset]
+   211                                  ;-------------------------------------------------------------------------------
+   212 0000017C 0000                            pgdt dw 0 ;GDT size space
+   213 0000017E 00800000                             dd 0x00008000 ;GDT adress
+   214                                  
+   215                                  ;-------------------------------------------------------------------------------
+   216 00000182 00<rept>                        times 510-($-$$) db 0
+   217 000001FE 55AA                                             db 0x55,0xaa
+   218                                  ;===============================================================================
